@@ -1,0 +1,8 @@
+{
+  "data_path": "C:\\VScode-Project\\GRAD PROJECT\\New\\Hypertension\\hypertension_dataset.csv",
+  "target": "Has_Hypertension",
+  "best_model": "GradientBoosting",
+  "cv_mean_accuracy": 0.9904282115869018,
+  "cv_std": 0.0029375072518111967,
+  "test_accuracy": 0.9773299748110831
+}
