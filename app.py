@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Optional, Dict, Any
-import json
 
 import pandas as pd
 import numpy as np
@@ -17,18 +16,14 @@ from sklearn.metrics import (
     accuracy_score,
     classification_report,
     confusion_matrix,
-    roc_auc_score,
 )
 import joblib
 
 app = FastAPI(title="Hypertension Train & Predict API")
 
-DEFAULT_DATA_PATH = (
-    r"C:\VScode-Project\GRAD PROJECT\New\Hypertension\hypertension_dataset.csv"
-)
-DEFAULT_OUT_MODEL = Path(
-    r"C:\VScode-Project\GRAD PROJECT\New\Hypertension\best_model.joblib"
-)
+_BASE_DIR = Path(__file__).parent
+DEFAULT_DATA_PATH = str(_BASE_DIR / "hypertension_dataset.csv")
+DEFAULT_OUT_MODEL = _BASE_DIR / "best_model.joblib"
 CV_SPLITS = 5
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
@@ -44,6 +39,7 @@ CATEGORICAL_COLS = [
 TARGET_DEFAULT = "Has_Hypertension"
 
 _loaded_pipeline = None
+_target_classes = None
 _label_encoder = None
 _saved_model_path = None
 
@@ -80,25 +76,48 @@ def build_preprocessor():
 
 def fit_label_encoder_if_needed(y):
     global _label_encoder
-    if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+    if not pd.api.types.is_numeric_dtype(y):
         le = LabelEncoder()
-        y_enc = le.fit_transform(y)
+        y_enc = le.fit_transform(y.astype(str))
         _label_encoder = le
         return y_enc
     return y
 
 
-def save_pipeline(pipeline: Pipeline, out_path: Path):
-    joblib.dump(pipeline, out_path, compress=3)
+def target_classes_from(y) -> list:
+    """JSON-safe label list: encoder classes if used, else sorted unique values."""
+    global _label_encoder
+    if _label_encoder is not None:
+        return [str(c) for c in _label_encoder.classes_]
+    return sorted({int(v) for v in np.asarray(y).ravel()})
+
+
+def pack_artifact(pipeline: Pipeline, target_classes: list, best_name: str) -> Dict[str, Any]:
+    return {
+        "pipeline": pipeline,
+        "target_classes": target_classes,
+        "best_model": best_name,
+    }
+
+
+def unpack_artifact(obj):
+    """Accept current dict artifacts and legacy bare-pipeline files."""
+    if isinstance(obj, dict) and "pipeline" in obj:
+        return obj["pipeline"], obj.get("target_classes")
+    return obj, None
+
+
+def save_pipeline(artifact: Dict[str, Any], out_path: Path):
+    joblib.dump(artifact, out_path, compress=3)
     return str(out_path.resolve())
 
 
 def load_pipeline(path: Path):
-    global _loaded_pipeline, _saved_model_path
+    global _loaded_pipeline, _target_classes, _saved_model_path
     if _loaded_pipeline is None or (
         _saved_model_path and str(path.resolve()) != str(_saved_model_path)
     ):
-        _loaded_pipeline = joblib.load(path)
+        _loaded_pipeline, _target_classes = unpack_artifact(joblib.load(path))
         _saved_model_path = str(path.resolve())
     return _loaded_pipeline
 
@@ -210,15 +229,20 @@ def train(req: TrainRequest):
     cm = confusion_matrix(y_test, y_pred).tolist()
 
     out_model_path = Path(req.out_model) if req.out_model else DEFAULT_OUT_MODEL
-    saved_path = save_pipeline(best_pipeline, out_model_path)
+    target_classes = target_classes_from(y)
+    saved_path = save_pipeline(
+        pack_artifact(best_pipeline, target_classes, best_name), out_model_path
+    )
 
-    global _loaded_pipeline
+    global _loaded_pipeline, _target_classes
     _loaded_pipeline = best_pipeline
+    _target_classes = target_classes
 
     summary = {
         "data_path": str(data_file.resolve()),
         "target_col": target_col,
         "best_model": best_name,
+        "target_classes": target_classes,
         "cv_results": cv_results,
         "test_accuracy": test_acc,
         "classification_report": report,
@@ -247,8 +271,12 @@ def predict(payload: PredictRequest):
         prob = None
         if hasattr(pipeline.named_steps["clf"], "predict_proba"):
             prob = float(pipeline.predict_proba(df_row).max())
-        if _label_encoder is not None:
-            pred_label = _label_encoder.inverse_transform([int(pred)])[0]
+        # Prefer classes stored in the artifact (works on fresh loads);
+        # fall back to the in-memory encoder, then the raw value.
+        if _target_classes:
+            pred_label = _target_classes[int(pred)]
+        elif _label_encoder is not None:
+            pred_label = str(_label_encoder.inverse_transform([int(pred)])[0])
         else:
             pred_label = int(pred)
     except Exception as e:

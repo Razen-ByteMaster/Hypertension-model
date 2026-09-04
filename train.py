@@ -19,7 +19,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
 
-DATA_PATH = r"C:\VScode-Project\GRAD PROJECT\New\Hypertension\hypertension_dataset.csv"
+DATA_PATH = Path(__file__).parent / "hypertension_dataset.csv"
 OUT_PATH = Path("best_model.joblib")
 CV_SPLITS = 5
 TEST_SIZE = 0.2
@@ -54,9 +54,9 @@ X = df.drop(columns=[target_col])
 y = df[target_col]
 
 le = None
-if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+if not pd.api.types.is_numeric_dtype(y):
     le = LabelEncoder()
-    y = le.fit_transform(y)
+    y = le.fit_transform(y.astype(str))
     print(f"Encoded target classes: {list(le.classes_)}")
 
 numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
@@ -70,10 +70,18 @@ numeric_transformer = Pipeline(
     steps=[("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]
 )
 
+
+def make_onehot_encoder():
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:  # sklearn < 1.2
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+
 categorical_transformer = Pipeline(
     steps=[
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ("onehot", make_onehot_encoder()),
     ]
 )
 
@@ -101,7 +109,7 @@ for name, clf in models.items():
         cv_results[name] = {
             "mean_accuracy": float(scores.mean()),
             "std": float(scores.std()),
-            "all": [float(s) for s in scores],
+            "folds": [float(s) for s in scores],
         }
         print(f"{name}: CV acc mean={scores.mean():.4f} std={scores.std():.4f}")
     except Exception as e:
@@ -148,13 +156,31 @@ if is_binary and hasattr(best_pipeline.named_steps["clf"], "predict_proba"):
     except Exception as e:
         print(f"Could not compute ROC AUC: {e}")
 
-joblib.dump(best_pipeline, OUT_PATH, compress=3)
+joblib.dump(
+    {
+        "pipeline": best_pipeline,
+        "target_classes": (
+            [str(c) for c in le.classes_]
+            if le is not None
+            else sorted({int(v) for v in np.asarray(y).ravel()})
+        ),
+        "best_model": best_name,
+        "test_accuracy": float(test_acc),
+    },
+    OUT_PATH,
+    compress=3,
+)
 print(f"\nSaved best pipeline to: {OUT_PATH}")
 
 summary = {
     "data_path": str(data_file),
     "target": target_col,
     "best_model": best_name,
+    "target_classes": (
+        [str(c) for c in le.classes_]
+        if le is not None
+        else sorted({int(v) for v in np.asarray(y).ravel()})
+    ),
     "cv_mean_accuracy": valid[best_name]["mean_accuracy"],
     "cv_std": valid[best_name]["std"],
     "test_accuracy": float(test_acc),
